@@ -117,9 +117,9 @@ conc_op <- conc_df %>%
   summarise(
     # All censored,keep minimum LOD (Limit of Detection)
     # Any detected, mean of detected values only (to make sure one daily concentration data)
-    result   = ifelse(all(censored, na.rm = TRUE),
-                      min(result),
-                      mean(result[!censored], na.rm = TRUE)),
+    result = ifelse(all(censored, na.rm = TRUE),
+                    min(result),
+                    mean(result[!censored], na.rm = TRUE)),
     censored = all(censored, na.rm = TRUE)
   ) %>% 
   ungroup()
@@ -224,7 +224,7 @@ ggplot(df_used %>% filter(detected),
   geom_smooth(method = "loess", se = TRUE,
               colour = "steelblue", linewidth = 0.8) +
   facet_wrap(~wq_site_name, scales = "free_y", ncol = 4) +
-  labs(title    = "Orthophosphate concentration over time per candidate sites",
+  labs(title = "Orthophosphate concentration over time per candidate sites",
        x = NULL, y = "Orthophospate (mg/L)") +
   theme_bw() +
   theme(strip.text = element_text(size = 10))
@@ -699,7 +699,7 @@ qq_plot_list <- lapply(sites, function(s) {
   r <- qq_all[qq_all$site == s & qq_all$cens_flag == "none", "residual"]
   
   # standardise
-  r_std <- (r - mean(r)) / sd(r)
+  r_std <- (r - mean(r))/sd(r)
   
   ggplot(data.frame(r = r_std), aes(sample = r)) +
     stat_qq(colour = "#2166ac", alpha = 0.6, size = 1.2) +
@@ -832,11 +832,11 @@ ggplot() +
     fill = "#5599cc", alpha = 0.5
   ) +
   geom_line(
-    data      = pred_summary_gapfilled %>% filter(.width == 0.50),
+    data = pred_summary_gapfilled %>% filter(.width == 0.50),
     aes(x = date, y = pred_mgL),
-    colour    = "#2266aa",
+    colour = "#2266aa",
     linewidth = 0.4,
-    na.rm     = FALSE
+    na.rm = FALSE
   ) +
   geom_point(
     data = pred_summary %>% filter(.width == 0.50, !is.na(obs_conc)),
@@ -853,7 +853,7 @@ ggplot() +
   ) +
   facet_wrap(~site_short, ncol = 1, scales = "free_y") +
   labs(
-    title    = "Daily predicted vs observed orthophosphate — M3",
+    title = "Daily predicted vs observed orthophosphate — M3",
     x = NULL, y = "Orthophosphate (mg/L)",
     colour = NULL, shape = NULL
   ) +
@@ -960,8 +960,8 @@ apportionment <- function(fit, newflow, ndraws = 500) {
     tibble(flow = q,
            point_source = pt,
            diffuse_source = dif,
-           pct_point = 100*pt  / (pt + dif),
-           pct_diffuse= 100*dif / (pt + dif))
+           pct_point = 100*pt  / (pt+ dif),
+           pct_diffuse= 100*dif / (pt+dif))
   })
 }
 
@@ -1094,7 +1094,7 @@ apportion_timepoint_season <- function(fit, site_name, data, daily_data, years, 
       D_draws <- linpred_draws(fit, newdata = newdata,
                                nlpar= "D", 
                                ndraws = 500, 
-                               seed  = 42)$.linpred
+                               seed = 42)$.linpred
       
       # Also draw 500 samples from the full posterior to get the intercept
       # parameters (log-scale intercepts for point and diffuse components)
@@ -1152,7 +1152,7 @@ apportion_season %>%
 apportion_season %>%
   group_by(site, year) %>%
   summarise(
-    pct_point   = mean(pct_point,   na.rm = TRUE),
+    pct_point = mean(pct_point,   na.rm = TRUE),
     pct_diffuse = mean(pct_diffuse, na.rm = TRUE),
     .groups = "drop"
   ) %>%
@@ -1160,8 +1160,8 @@ apportion_season %>%
     site = factor(site, levels = c("Thames", "Trent", "Severn")),
     year = factor(year)
   ) %>%
-  pivot_longer(cols      = c(pct_point, pct_diffuse),
-               names_to  = "source",
+  pivot_longer(cols = c(pct_point, pct_diffuse),
+               names_to = "source",
                values_to = "pct") %>%
   mutate(source = if_else(source == "pct_point",
                           "Point source", "Diffuse source"),
