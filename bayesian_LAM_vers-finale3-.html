@@ -3402,7 +3402,7 @@ et al. (2008):</p>
 <h2><span class="header-section-number">4.2</span> M2, Time-varying
 LAM</h2>
 <p>B(t) and D(t) drift smoothly via thin-plate splines with k=6 basis
-functions.</p>
+functions</p>
 <div class="sourceCode" id="cb25"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" tabindex="-1"></a>formula_m2 <span class="ot">&lt;-</span> <span class="fu">bf</span>(</span>
 <span id="cb25-2"><a href="#cb25-2" tabindex="-1"></a>  log10_conc <span class="sc">|</span> <span class="fu">cens</span>(cens_flag) <span class="sc">~</span></span>
 <span id="cb25-3"><a href="#cb25-3" tabindex="-1"></a>    <span class="fu">log10</span>(<span class="dv">10</span><span class="sc">^</span>(logA <span class="sc">+</span> (B <span class="sc">-</span> <span class="dv">1</span>) <span class="sc">*</span> log10_flow) <span class="sc">+</span> <span class="dv">10</span><span class="sc">^</span>(logE <span class="sc">+</span> (D <span class="sc">-</span> <span class="dv">1</span>) <span class="sc">*</span> log10_flow)),</span>
@@ -3427,9 +3427,9 @@ functions.</p>
 <span id="cb25-22"><a href="#cb25-22" tabindex="-1"></a>  <span class="fu">list</span>(<span class="at">logA =</span> <span class="sc">-</span><span class="fl">0.5</span>, <span class="at">B =</span> <span class="fl">0.0</span>, <span class="at">logE =</span> <span class="sc">-</span><span class="fl">1.5</span>, <span class="at">D =</span> <span class="fl">1.5</span>, <span class="at">nu =</span> <span class="dv">5</span>),</span>
 <span id="cb25-23"><a href="#cb25-23" tabindex="-1"></a>  <span class="at">simplify =</span> <span class="cn">FALSE</span>)</span></code></pre></div>
 </div>
-<div id="m3-seasonal-time-varying-lam" class="section level2" number="4.3">
-<h2><span class="header-section-number">4.3</span> M3, Seasonal +
-Time-varying LAM</h2>
+<div id="m3-seasonal-adjustment-time-varying-lam" class="section level2" number="4.3">
+<h2><span class="header-section-number">4.3</span> M3, Seasonal
+adjustment + Time-varying LAM</h2>
 <p>Extends M2 by adding a cyclic cubic spline for calendar month.</p>
 <div class="sourceCode" id="cb26"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" tabindex="-1"></a>formula_m3 <span class="ot">&lt;-</span> <span class="fu">bf</span>(</span>
 <span id="cb26-2"><a href="#cb26-2" tabindex="-1"></a>  log10_conc <span class="sc">|</span> <span class="fu">cens</span>(cens_flag) <span class="sc">~</span></span>
@@ -3481,7 +3481,7 @@ for One Site</h2>
 <span id="cb27-18"><a href="#cb27-18" tabindex="-1"></a>    <span class="at">init    =</span> init,</span>
 <span id="cb27-19"><a href="#cb27-19" tabindex="-1"></a>    <span class="at">control =</span> <span class="fu">list</span>(<span class="at">adapt_delta   =</span> adapt_delta,</span>
 <span id="cb27-20"><a href="#cb27-20" tabindex="-1"></a>                   <span class="at">max_treedepth =</span> treedepth),</span>
-<span id="cb27-21"><a href="#cb27-21" tabindex="-1"></a>    <span class="at">file    =</span> <span class="fu">paste0</span>(<span class="st">&quot;vers16_lam_&quot;</span>, <span class="fu">tolower</span>(site), <span class="st">&quot;_&quot;</span>, model_label)</span>
+<span id="cb27-21"><a href="#cb27-21" tabindex="-1"></a>    <span class="at">file    =</span> <span class="fu">paste0</span>(<span class="st">&quot;rds_file/vers16_lam_&quot;</span>, <span class="fu">tolower</span>(site), <span class="st">&quot;_&quot;</span>, model_label)</span>
 <span id="cb27-22"><a href="#cb27-22" tabindex="-1"></a>  )</span>
 <span id="cb27-23"><a href="#cb27-23" tabindex="-1"></a>}</span></code></pre></div>
 <hr />
