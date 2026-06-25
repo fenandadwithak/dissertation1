@@ -4,12 +4,15 @@ subtitle: "Thames, Trent, and Severn"
 author: "Fenanda Dwitha Kurniasari (S2744048)"
 date: "`r Sys.Date()`"
 output:
-  rmdformats::readthedown:
+  html_document:
+    toc: true
     toc_depth: 3
+    toc_float: true
     number_sections: true
     highlight: tango
     df_print: paged
     code_folding: show
+    theme: flatly
 ---
 
 ```{r setup, include=FALSE}
@@ -45,19 +48,19 @@ library(dplyr)
 
 ## Data Collection
 
-Already stored in `R.data` file
+Already stored in `R.data` file. If you want to run again from the start, remove comment below `"`
 
 ```{r}
 # source("import_wq_function.R")
 # source("import_hde_function.R")
 # 
-# conc_sites <- c("TH-PTHR0107",   # Thames at Teddington
-#                 "MD-00025085",   # Severn at Haw Bridge
-#                 "NE-45400013",   # Tees at Low Worsall
-#                 "NW-88006427",   # Eden at Sheepmount
-#                 "MD-36701570",   # Trent at Dunham
-#                 "AN-WEN250",     # Wensum at Sweet Briar
-#                 "NW-88003872"    # Wyre nr St Michaels
+# conc_sites <- c("TH-PTHR0107", # Thames at Teddington
+#                 "MD-00025085",# Severn at Haw Bridge
+#                 "NE-45400013",# Tees at Low Worsall
+#                 "NW-88006427",# Eden at Sheepmount
+#                 "MD-36701570",# Trent at Dunham
+#                 "AN-WEN250",# Wensum at Sweet Briar
+#                 "NW-88003872" # Wyre nr St Michaels
 #                 )     
 # 
 # flow_sites <- c("3400TH", "2606", "F3606", "765512", 
@@ -65,19 +68,19 @@ Already stored in `R.data` file
 # 
 # 
 # # Import concentration data — all determinands so we can check censoring first
-# det_codes <- c("0180",   # Orthophosphate
-#                "0117",   # Nitrate
-#                "0111",   # Ammonia
-#                "3408")   # Dissolved Zinc
+# det_codes <- c("0180",# Orthophosphate
+#                "0117",# Nitrate
+#                "0111",# Ammonia
+#                "3408")# Dissolved Zinc
 # 
 # conc_df <- NULL
 # for (i in seq_along(conc_sites)) {
 #   tmp <- import_wq(
-#     sites      = conc_sites[i],
-#     dets       = det_codes,
+#     sites = conc_sites[i],
+#     dets = det_codes,
 #     start_date = "2000-01-01",
-#     end_date   = "2025-12-31",
-#     save       = FALSE
+#     end_date = "2025-12-31",
+#     save = FALSE
 #   )
 #   conc_df <- rbind(conc_df, tmp)
 # }
@@ -86,20 +89,20 @@ Already stored in `R.data` file
 # flow_df <- NULL
 # for (i in seq_along(flow_sites)) {
 #   tmp <- import_hde(
-#     sites      = flow_sites[i],
+#     sites = flow_sites[i],
 #     start_date = "2000-01-01",
-#     end_date   = "2025-12-31"
+#     end_date = "2025-12-31"
 #   )
 #   flow_df <- rbind(flow_df, tmp)
 # }
 
 # Open datasets
-load("D:/Fenanda S2/Dissertation Project/Project 1/dataset per 31 december 2025 (used).RData")
+load("dataset per 31 december 2025 (used).RData")
 ```
 
 ## Clean Concentration Data
 
-Orthophosphate observations with qualifier `"<"` are left-censored (below the limit of detection, LOD). Where multiple measurements fall on the same day: if all are censored, we keep the minimum LOD; if any are detected, we average the detected values only.
+Orthophosphate observations with qualifier `"<"` are left-censored (below the limit of detection, LOD). Where multiple measurements fall on the same day: if all are censored, we keep the minimum LOD. If any are detected, we average the detected values only.
 
 ```{r clean-conc}
 op_det <- c("Orthophosphate, reactive as P")
@@ -112,7 +115,7 @@ conc_op <- conc_df %>%
   ) %>%
   group_by(wq_site_name, date) %>%
   summarise(
-    # All censored, keep minimum LOD (Limit of Detection)
+    # All censored,keep minimum LOD (Limit of Detection)
     # Any detected, mean of detected values only (to make sure one daily concentration data)
     result   = ifelse(all(censored, na.rm = TRUE),
                       min(result),
@@ -126,7 +129,7 @@ summary(conc_op)
 
 ## Clean Flow Data
 
-Manual lookup table matches each NRFA gauge ID to the corresponding EA water quality site.
+Recode each NRFA gauge ID to the corresponding EA water quality site
 
 ```{r clean-flow}
 flow_clean <- flow_df %>%
@@ -225,7 +228,7 @@ ggplot(df_used %>% filter(detected),
        x = NULL, y = "Orthophospate (mg/L)") +
   theme_bw() +
   theme(strip.text = element_text(size = 10))
-ggsave("vers15_op_site_selection_trend.png", width = 14, height = 6, dpi = 150)
+ggsave("output_img/vers15_op_site_selection_trend.png", width = 14, height = 6, dpi = 150)
 
 #Censoring Profile
 ggplot(df_used %>%
@@ -240,7 +243,7 @@ ggplot(df_used %>%
        x = NULL, y = "% below detection limit") +
   theme_bw() +
   theme(strip.text = element_text(size = 10))
-ggsave("vers15_op_site_selection_censoring.png", width = 14, height = 6, dpi = 150)
+ggsave("output_img/vers15_op_site_selection_censoring.png", width = 14, height = 6, dpi = 150)
 
 site_summary
 ```
@@ -294,7 +297,7 @@ p_log <- ggplot(df_used, aes(x = log10_conc)) +
   theme_bw()
 
 p_raw / p_log #combine the plot
-ggsave("vers15_eda_raw_vs_log10.png", width = 10, height = 6, dpi = 150)
+ggsave("output_img/vers15_eda_raw_vs_log10.png", width = 10, height = 6, dpi = 150)
 ```
 
 ## Q-Q Plot
@@ -309,7 +312,7 @@ ggplot(df_used, aes(sample = log10_conc)) +
        y = expression(log[10](orthophosphate~~(mg~L^{-1})))) +
   theme_bw() +
   theme(strip.text = element_text(size = 10))
-ggsave("vers15_qqplot_log10.png", width = 10, height = 4, dpi = 150)
+ggsave("output_img/vers15_qqplot_log10.png", width = 10, height = 4, dpi = 150)
 ```
 
 ## Concentration vs Flow
@@ -324,7 +327,7 @@ ggplot(df_used, aes(x = flow, y = result)) +
        x = expression((flow~~m^3~s^{-1})),
        y = expression((Orthophospate~~mg~L^{-1}))) +
   theme_bw()
-ggsave("vers15_lam_eda_scatter.png", width = 10, height = 4, dpi = 150)
+ggsave("output_img/vers15_lam_eda_scatter.png", width = 10, height = 4, dpi = 150)
 ```
 
 ## Seasonal Flow-Concentration
@@ -350,7 +353,7 @@ ggplot(df_used,
        x = expression(log[10](flow~~m^3~s^{-1})),
        y = expression(log[10](Orthophosphate~~mg~L^{-1}))) +
   theme_bw() + theme(strip.text = element_text(size = 10))
-ggsave("vers15_lam_eda_seasonal.png", width = 10, height = 6, dpi = 150)
+ggsave("output_img/vers15_lam_eda_seasonal.png", width = 10, height = 6, dpi = 150)
 ```
 
 ## Concentration-Flow Relationship by Period
@@ -388,7 +391,7 @@ df_used %>%
   guides(colour = guide_legend(override.aes = list(alpha = 1, size = 3)),
          fill = "none") +
   theme(legend.position = "bottom") + theme(strip.text = element_text(size = 10))
-ggsave("vers15_eda_era_comparison.png",
+ggsave("output_img/vers15_eda_era_comparison.png",
        width = 13, height = 4, dpi = 150)
 ```
 
@@ -468,7 +471,7 @@ formula_m3 <- bf(
   B ~ s(time_index, k = 6),
   logE ~ 1,
   D ~ s(time_index, k = 6),
-  seas ~ s(month, bs = "cc", k = 6),  # cyclic: Jan joins Dec smoothly
+  seas ~ s(month, bs = "cc", k = 6),  # cyclic, Jan joins Dec smoothly
   nl = TRUE
 )
 
@@ -478,9 +481,9 @@ priors_m3 <- c(
   prior(normal(-1.5, 0.5), nlpar = "logE"),
   prior(normal( 1.5, 0.3), nlpar = "D",    lb = 1),
   prior(normal( 0.0, 0.3), nlpar = "seas"),  # seasonal centred at 0
-  prior(normal(0, 0.5), nlpar = "B",    class = "sds", lb = 0),
-  prior(normal(0, 0.5), nlpar = "D",    class = "sds", lb = 0),
-  prior(normal(0, 0.5), nlpar = "seas", class = "sds", lb = 0),
+  prior(normal(0, 0.5), nlpar = "B", class = "sds", lb = 0),
+  prior(normal(0, 0.5), nlpar = "D",class = "sds", lb = 0),
+  prior(normal(0, 0.5), nlpar = "seas",class = "sds", lb = 0),
   prior(gamma(2, 0.1), class = "nu")
 )
 
@@ -618,7 +621,7 @@ for (s in sites) {
     theme_bw(base_size = 9)
   
   ggsave(
-    filename = sprintf("trace_%s.png", s), plot = p, width = 8,
+    filename = sprintf("output_img/ver15_trace_%s.png", s), plot = p, width = 8,
     height = 10,dpi = 300
   )
 }
@@ -656,7 +659,7 @@ combined <- wrap_plots(ppc_plots, ncol = 3) +
 
 print(combined)
 
-ggsave("ppc_m3_combined.png",
+ggsave("output_img/vers15_ppc_m3_combined.png",
        plot = combined, width = 18, height = 5, dpi = 150)
 ```
 
@@ -717,7 +720,7 @@ combined_qq <- wrap_plots(qq_plot_list, ncol = 3) +
 
 print(combined_qq)
 
-ggsave("qq_residuals_m3.png", plot = combined_qq,
+ggsave("output_img/ver15_qq_residuals_m3.png", plot = combined_qq,
        width = 12, height = 4.5, dpi = 300)
 
 
@@ -856,7 +859,7 @@ ggplot() +
   ) +
   theme_bw() +
   theme(legend.position = "bottom") 
-ggsave("vers15_daily_pred_m3_alldays.png", width = 14, height = 8, dpi = 150)
+ggsave("output_img/vers15_daily_pred_m3_alldays.png", width = 14, height = 8, dpi = 150)
 ```
 
 ## Concentration vs Flow (Daily Conc from Fitted Model)
@@ -903,7 +906,7 @@ pred_summary_flow %>%
   ) +
   theme_bw() +
   theme(legend.position = "bottom")
-ggsave("vers15_lam_eda_scatter_predict.png", width = 10, height = 4, dpi = 150)
+ggsave("output_img/vers15_lam_eda_scatter_predict.png", width = 10, height = 4, dpi = 150)
 ```
 
 ## Time-varying Exponents B(t) and D(t)
@@ -930,13 +933,13 @@ D_plots <- lapply(sites, function(s) {
 wrap_plots(B_plots, ncol = 3) +
   plot_annotation(title = "Time-varying point-source exponent B(t)",
                   subtitle = "More negative = stronger dilution")
-ggsave("vers15_b over time.png",
+ggsave("output_img/vers15_b over time.png",
        width = 13, height = 4, dpi = 150)
 
 wrap_plots(D_plots, ncol = 3) +
   plot_annotation(title = "Time-varying diffuse-source exponent D(t)",
                   subtitle = "Higher = stronger runoff signal")
-ggsave("vers15_d over time.png",
+ggsave("output_img/vers15_d over time.png",
        width = 13, height = 4, dpi = 150)
 ```
 
@@ -1004,7 +1007,7 @@ ggplot(apportion_all, aes(x = flow)) +
   theme_bw() +
   theme(legend.position = "bottom")+theme(strip.text = element_text(size = 10))
 
-ggsave("vers15_appor1.png", width = 10, height = 4, dpi = 150)
+ggsave("output_img/vers15_appor1.png", width = 10, height = 4, dpi = 150)
 ```
 
 ## Apportionment at Specific Time Points (Final Model)
@@ -1186,7 +1189,7 @@ apportion_season %>%
         strip.text = element_text(size = 10))
 
 
-ggsave("apportion_pct.png", width = 10, height = 4, dpi = 150)
+ggsave("output_img/apportion_pct.png", width = 10, height = 4, dpi = 150)
 ```
 
 ------------------------------------------------------------------------
