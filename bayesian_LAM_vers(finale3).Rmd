@@ -17,7 +17,7 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo    = TRUE,
+  echo = TRUE,
   warning = FALSE,
   message = FALSE,
   fig.width  = 10,
@@ -31,6 +31,12 @@ set.seed(42)
 # Packages
 
 ```{r packages}
+#install packages
+# install.packages(c(
+#   "brms", "tidyverse", "posterior", "bayesplot", "tidybayes",
+#   "lubridate", "patchwork", "moments", "dplyr", "knitr"
+# ))
+
 library(brms)
 library(tidyverse)
 library(posterior)
