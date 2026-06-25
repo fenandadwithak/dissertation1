@@ -1,0 +1,1288 @@
+---
+title: "A Bayesian Time-Varying Load Apportionment Model for Daily Prediction and Source Apportionment of Orthophosphate"
+subtitle: "Thames, Trent, and Severn"
+author: "Fenanda Dwitha Kurniasari (S2744048)"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+    df_print: paged
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 10,
+  fig.height = 6
+)
+
+# Global seed for reproducibility
+set.seed(42)
+```
+
+# Packages
+
+```{r packages}
+library(brms)
+library(tidyverse)
+library(posterior)
+library(bayesplot)
+library(tidybayes)
+library(lubridate)
+library(patchwork)
+library(moments)
+library(dplyr)
+```
+
+------------------------------------------------------------------------
+
+# Data Preparation
+
+## Data Collection
+
+Already stored in `R.data` file
+
+```{r}
+# source("import_wq_function.R")
+# source("import_hde_function.R")
+# 
+# conc_sites <- c("TH-PTHR0107",   # Thames at Teddington
+#                 "MD-00025085",   # Severn at Haw Bridge
+#                 "NE-45400013",   # Tees at Low Worsall
+#                 "NW-88006427",   # Eden at Sheepmount
+#                 "MD-36701570",   # Trent at Dunham
+#                 "AN-WEN250",     # Wensum at Sweet Briar
+#                 "NW-88003872"    # Wyre nr St Michaels
+#                 )     
+# 
+# flow_sites <- c("3400TH", "2606", "F3606", "765512", 
+#                 "4022", "034001", "720517")
+# 
+# 
+# # Import concentration data — all determinands so we can check censoring first
+# det_codes <- c("0180",   # Orthophosphate
+#                "0117",   # Nitrate
+#                "0111",   # Ammonia
+#                "3408")   # Dissolved Zinc
+# 
+# conc_df <- NULL
+# for (i in seq_along(conc_sites)) {
+#   tmp <- import_wq(
+#     sites      = conc_sites[i],
+#     dets       = det_codes,
+#     start_date = "2000-01-01",
+#     end_date   = "2025-12-31",
+#     save       = FALSE
+#   )
+#   conc_df <- rbind(conc_df, tmp)
+# }
+# 
+# # Import flow data
+# flow_df <- NULL
+# for (i in seq_along(flow_sites)) {
+#   tmp <- import_hde(
+#     sites      = flow_sites[i],
+#     start_date = "2000-01-01",
+#     end_date   = "2025-12-31"
+#   )
+#   flow_df <- rbind(flow_df, tmp)
+# }
+
+# Open datasets
+load("D:/Fenanda S2/Dissertation Project/Project 1/dataset per 31 december 2025 (used).RData")
+```
+
+## Clean Concentration Data
+
+Orthophosphate observations with qualifier `"<"` are left-censored (below the limit of detection, LOD). Where multiple measurements fall on the same day: if all are censored, we keep the minimum LOD; if any are detected, we average the detected values only.
+
+```{r clean-conc}
+op_det <- c("Orthophosphate, reactive as P")
+
+conc_op <- conc_df %>%
+  filter(determinand %in% op_det) %>%
+  mutate(
+    date     = as.Date(date_time),
+    censored = !is.na(qualifier) & qualifier == "<"
+  ) %>%
+  group_by(wq_site_name, date) %>%
+  summarise(
+    # All censored, keep minimum LOD (Limit of Detection)
+    # Any detected, mean of detected values only (to make sure one daily concentration data)
+    result   = ifelse(all(censored, na.rm = TRUE),
+                      min(result),
+                      mean(result[!censored], na.rm = TRUE)),
+    censored = all(censored, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+
+summary(conc_op)
+```
+
+## Clean Flow Data
+
+Manual lookup table matches each NRFA gauge ID to the corresponding EA water quality site.
+
+```{r clean-flow}
+flow_clean <- flow_df %>%
+  mutate(
+    wq_site_name = case_when(
+      flow_site_id == "3400TH"  ~ "THAMES AT TEDDINGTON WEIR",
+      flow_site_id == "2606" ~ "RIVER SEVERN (LOWER) HAW BRIDGE",
+      flow_site_id == "F3606" ~ "TEES AT LOW WORSALL",
+      flow_site_id == "765512" ~ "RIVER EDEN AT SHEEPMOUNT",
+      flow_site_id == "4022" ~ "TIDAL TRENT - RIVER TRENT AT DUNHAM",
+      flow_site_id == "034001" ~ "R.WENSUM SWEET BRIAR RD.BR.",
+      flow_site_id == "720517" ~ "RIVER WYRE AT ST MICHAELS"
+    )
+  ) %>%
+  filter(!is.na(wq_site_name), !is.na(flow)) %>%
+  group_by(wq_site_name, date) %>%
+  summarise(flow = mean(flow, na.rm = TRUE)) %>% ungroup()
+
+summary(flow_clean)
+```
+
+## Join, Transform, and Create Time Index
+
+Concentration and flow are matched by site and date. Both are log₁₀-transformed before modelling. A continuous time index (years since first observation at each site) is created for the time-varying splines in M2 and M3.
+
+```{r join-transform}
+df_used <- conc_op %>%
+  left_join(flow_clean, by = c("wq_site_name", "date")) %>%
+  filter(!is.na(flow), !is.na(result), result > 0) %>%
+  mutate(
+    site_short = case_when(
+      wq_site_name == "THAMES AT TEDDINGTON WEIR" ~ "Thames",
+      wq_site_name == "TIDAL TRENT - RIVER TRENT AT DUNHAM" ~ "Trent",
+      wq_site_name == "RIVER SEVERN (LOWER) HAW BRIDGE" ~ "Severn",
+      wq_site_name == "TEES AT LOW WORSALL" ~ "Tees",
+      wq_site_name == "RIVER EDEN AT SHEEPMOUNT"~ "Eden",
+      wq_site_name == "R.WENSUM SWEET BRIAR RD.BR." ~ "Wensum",
+      wq_site_name == "RIVER WYRE AT ST MICHAELS" ~ "Wyre"
+    ),
+    site_short = factor(site_short,
+                        levels = c("Thames", "Trent", "Severn",
+                                   "Tees", "Eden", "Wensum", "Wyre")),
+    year  = year(date),
+    month  = month(date),
+    log10_conc = log10(result),
+    log10_flow = log10(flow),
+    cens_flag = if_else(censored, "left", "none"),
+    detected = !censored
+  ) %>%
+  group_by(site_short) %>%
+  # time_index, years elapsed since first observation at each site
+  mutate(time_index = as.numeric(date - min(date)) / 365.25) %>%
+  ungroup()
+
+summary(df_used)
+```
+
+## Exploratory Data per Sites
+
+We screen all seven candidate sites against, with some criteria, which are n ≥100 observations, ≤40% censoring, ≥10 years of record, and median concentration \>0.01 mg/L.
+
+```{r site-selection}
+site_summary <- df_used %>%
+  group_by(wq_site_name) %>%
+  summarise(
+    n = n(),
+    n_cens = sum(censored),
+    pct_cens = round(100 * mean(censored), 1),
+    year_min  = min(year(date)),
+    year_max = max(year(date)),
+    n_years = year_max - year_min + 1,
+    conc_median = round(median(result[!censored]), 4),
+    conc_min = round(min(result), 4),
+    conc_max = round(max(result), 4),
+    flow_median = round(median(flow), 2)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    flag_n = n >= 100,
+    flag_cens  = pct_cens <= 40,
+    flag_years = n_years >= 10,
+    flag_conc  = conc_median > 0.01,
+    score = flag_n + flag_cens + flag_years + flag_conc,
+    recommended = score == 4
+  )
+
+
+#Concentration Trend over time
+ggplot(df_used %>% filter(detected),
+       aes(x = date, y = result)) +
+  geom_point(alpha = 0.3, size = 0.6, colour = "steelblue1") +
+  geom_smooth(method = "loess", se = TRUE,
+              colour = "steelblue", linewidth = 0.8) +
+  facet_wrap(~wq_site_name, scales = "free_y", ncol = 4) +
+  labs(title    = "Orthophosphate concentration over time per candidate sites",
+       x = NULL, y = "Orthophospate (mg/L)") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 10))
+ggsave("vers15_op_site_selection_trend.png", width = 14, height = 6, dpi = 150)
+
+#Censoring Profile
+ggplot(df_used %>%
+         group_by(wq_site_name, year = year(date)) %>%
+         summarise(pct_cens = 100 * mean(!detected)) %>% ungroup(), 
+       aes(x = year, y = pct_cens)) +
+  geom_col(fill = "tomato", alpha = 0.7) +
+  geom_hline(yintercept = 40, linetype = "dashed",
+             colour = "black", linewidth = 0.5) +
+  facet_wrap(~wq_site_name, ncol = 4) +
+  labs(title    = "% censored observations per year and candidate sites",
+       x = NULL, y = "% below detection limit") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 10))
+ggsave("vers15_op_site_selection_censoring.png", width = 14, height = 6, dpi = 150)
+
+site_summary
+```
+
+## Sites Selection
+
+```{r}
+# Sites that pass all criteria
+sites_keep <- c(
+  "THAMES AT TEDDINGTON WEIR",
+  "TIDAL TRENT - RIVER TRENT AT DUNHAM",
+  "RIVER SEVERN (LOWER) HAW BRIDGE"
+)
+
+site_summary %>% filter(wq_site_name %in% sites_keep) %>%
+  select(wq_site_name, n, pct_cens, year_min, year_max,
+         conc_median, flow_median)
+
+# Keep only selected sites
+df_used <- df_used %>% filter(wq_site_name %in% sites_keep)
+```
+
+------------------------------------------------------------------------
+
+# Exploratory Data Analysis
+
+## Distribution: Raw vs Log₁₀
+
+```{r eda-distribution, fig.height=9}
+p_raw <- ggplot(df_used, aes(x = result)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 40, fill = "steelblue", alpha = 0.7, colour = "white") +
+  geom_density(colour = "darkblue", linewidth = 0.8) +
+  facet_wrap(~site_short, scales = "free", ncol = 3) +
+  labs(title = "Orthophospate concentration",
+       x = "Orthophosphate (mg/L)", y = "Density") +
+  theme_bw()
+
+p_log <- ggplot(df_used, aes(x = log10_conc)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 40, fill = "forestgreen", alpha = 0.7, colour = "white") +
+  geom_density(colour = "darkgreen", linewidth = 0.8) +
+  stat_function(fun = dnorm,
+                args = list(mean = mean(df_used$log10_conc),
+                            sd   = sd(df_used$log10_conc)),
+                colour = "red", linetype = "dashed", linewidth = 0.8) +
+  facet_wrap(~site_short, scales = "free", ncol = 3) +
+  labs(title = expression("Distribution of " * log[10] *
+                            "(Orthophosphate) by site"),
+       x = expression(log[10](Orthophospate)), y = "Density") +
+  theme_bw()
+
+p_raw / p_log #combine the plot
+ggsave("vers15_eda_raw_vs_log10.png", width = 10, height = 6, dpi = 150)
+```
+
+## Q-Q Plot
+
+```{r eda-qq, fig.height=5}
+ggplot(df_used, aes(sample = log10_conc)) +
+  stat_qq(colour = "steelblue", alpha = 0.4, size = 0.8) +
+  stat_qq_line(colour = "red", linetype = "dashed", linewidth = 0.8) +
+  facet_wrap(~site_short, scales = "free", ncol = 3) +
+  labs(title    = expression("Q-Q Plot of " * log[10]*"(orthophosphate) by site"),
+       x = "Theoretical quantiles",
+       y = expression(log[10](orthophosphate~~(mg~L^{-1})))) +
+  theme_bw() +
+  theme(strip.text = element_text(size = 10))
+ggsave("vers15_qqplot_log10.png", width = 10, height = 4, dpi = 150)
+```
+
+## Concentration vs Flow
+
+```{r eda-scatter, fig.height=4}
+# plotting between concentration vs flow
+ggplot(df_used, aes(x = flow, y = result)) +
+  geom_point(alpha = 0.4, size = 1) +
+  geom_smooth(method = "loess", se = TRUE, colour = "red", linewidth = 0.8) +
+  facet_wrap(~site_short, scales = "free") +
+  labs(title = expression(log[10](Orthophospate)~~"vs"~~log[10](flow)~~"in 25 years"),
+       x = expression((flow~~m^3~s^{-1})),
+       y = expression((Orthophospate~~mg~L^{-1}))) +
+  theme_bw()
+ggsave("vers15_lam_eda_scatter.png", width = 10, height = 4, dpi = 150)
+```
+
+## Seasonal Flow-Concentration
+
+```{r eda-seasonal, fig.height=8}
+# checking seasonality in seasonal-flow concentration
+ggplot(df_used,
+       aes(x = log10_flow, y = log10_conc, colour = factor(month))) +
+  geom_point(alpha = 0.5, size = 1) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.6) +
+  facet_grid(
+    ifelse(month %in% c(10, 11, 12, 1, 2, 3),
+           "Winter (Oct-Mar)", "Summer (Apr-Sep)") ~ site_short,
+    scales = "free"
+  )+
+  scale_colour_viridis_d(
+    name   = "Month",
+    labels = c("1" = "Jan", "2" = "Feb", "3" = "Mar", "4" = "Apr",
+               "5" = "May", "6" = "Jun", "7" = "Jul", "8" = "Aug",
+               "9" = "Sep", "10" = "Oct", "11" = "Nov", "12" = "Dec")
+  ) +
+  labs(title = "Seasonal flow-concentration by site",
+       x = expression(log[10](flow~~m^3~s^{-1})),
+       y = expression(log[10](Orthophosphate~~mg~L^{-1}))) +
+  theme_bw() + theme(strip.text = element_text(size = 10))
+ggsave("vers15_lam_eda_seasonal.png", width = 10, height = 6, dpi = 150)
+```
+
+## Concentration-Flow Relationship by Period
+
+Shifting loess curves across periods indicate that B(t) and D(t) are not constant — this motivates the time-varying extensions M2 and M3.
+
+```{r eda-era, fig.height=5}
+df_used %>%
+  mutate(era = case_when(
+    year(date) < 2009 ~ "2000-2008",
+    year(date) < 2017 ~ "2009-2016",
+    TRUE ~ "2017-2025" #others
+  )) %>%
+  ggplot(aes(x = log10_flow, y = log10_conc, colour = era)) +
+  geom_point(aes(shape = era), alpha = 0.3, size = 1.2) +
+  geom_smooth(aes(fill = era), method = "loess",
+              se = TRUE, linewidth = 1.2, alpha = 0.15) +
+  scale_colour_manual(name   = "Period",
+                      values = c("2000-2008" = "#d73027",
+                                 "2009-2016" = "#f46d43",
+                                 "2017-2025" = "#4575b4")) +
+  scale_fill_manual(name   = "Period",
+                    values = c("2000-2008" = "#d73027",
+                               "2009-2016" = "#f46d43",
+                               "2017-2025" = "#4575b4")) +
+  scale_shape_manual(name   = "Period",
+                     values = c("2000-2008" = 16,
+                                "2009-2016" = 17,
+                                "2017-2025" = 15)) +
+  facet_wrap(~site_short, ncol = 3, scales = "free") +
+  labs(title = "Concentration-flow relationship by period",
+       x = expression(log[10](flow~~m^3~s^{-1})),
+       y = expression(log[10](Orthophosphate~~mg~L^{-1}))) +
+  theme_bw() +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size = 3)),
+         fill = "none") +
+  theme(legend.position = "bottom") + theme(strip.text = element_text(size = 10))
+ggsave("vers15_eda_era_comparison.png",
+       width = 13, height = 4, dpi = 150)
+```
+
+------------------------------------------------------------------------
+
+# Model Formulas and Priors
+
+All three models share the same LAM mean function derived from Bowes et al. (2008):
+
+$$\mu_i = \log_{10}\!\left(10^{\log A + (B-1)\log_{10}Q_i} + 10^{\log E + (D-1)\log_{10}Q_i}\right)$$
+
+with Student-t likelihood and left-censoring via `cens(cens_flag)`.
+
+## M1, Static LAM
+
+```{r formula-m1}
+formula_m1 <- bf(
+  log10_conc | cens(cens_flag) ~
+    log10(10^(logA + (B - 1) * log10_flow) + 10^(logE + (D - 1) * log10_flow)),
+  logA ~ 1, B ~ 1, logE ~ 1, D ~ 1,
+  nl = TRUE
+)
+
+priors_m1 <- c(
+  prior(normal(-0.5, 0.5), nlpar = "logA"),          # A ≈ 0.3 mg/L
+  prior(normal( 0.0, 0.3), nlpar = "B",    ub = 1),  # B < 1 → dilution
+  prior(normal(-1.5, 0.5), nlpar = "logE"),           # C' ≈ 0.03 mg/L
+  prior(normal( 1.5, 0.3), nlpar = "D",    lb = 1),  # D > 1 → enrichment
+  prior(gamma(2, 0.1), class = "nu")              # Student-t df
+)
+
+# Starting values at expected LAM parameter values
+init_m1 <- replicate(4,
+  list(logA = -0.5, B = 0.0, logE = -1.5, D = 1.5, nu = 5),
+  simplify = FALSE)
+```
+
+## M2, Time-varying LAM
+
+B(t) and D(t) drift smoothly via thin-plate splines with k=6 basis functions.
+
+```{r formula-m2}
+formula_m2 <- bf(
+  log10_conc | cens(cens_flag) ~
+    log10(10^(logA + (B - 1) * log10_flow) + 10^(logE + (D - 1) * log10_flow)),
+  logA ~ 1,
+  B    ~ s(time_index, k = 6),
+  logE ~ 1,
+  D    ~ s(time_index, k = 6),
+  nl = TRUE
+)
+
+priors_m2 <- c(
+  prior(normal(-0.5, 0.5), nlpar = "logA"),
+  prior(normal( 0.0, 0.5), nlpar = "B",    ub = 1),
+  prior(normal(-1.5, 0.5), nlpar = "logE"),
+  prior(normal( 1.5, 0.3), nlpar = "D",    lb = 1),
+  prior(normal(0, 0.5), nlpar = "B",    class = "sds", lb = 0),
+  prior(normal(0, 0.5), nlpar = "D",    class = "sds", lb = 0),
+  prior(gamma(2, 0.1), class = "nu")
+)
+
+init_m2 <- replicate(4,
+  list(logA = -0.5, B = 0.0, logE = -1.5, D = 1.5, nu = 5),
+  simplify = FALSE)
+```
+
+## M3, Seasonal + Time-varying LAM
+
+Extends M2 by adding a cyclic cubic spline for calendar month.
+
+```{r formula-m3}
+formula_m3 <- bf(
+  log10_conc | cens(cens_flag) ~
+    log10(10^(logA + (B - 1) * log10_flow) + 10^(logE + (D - 1) * log10_flow)) + seas,
+  logA ~ 1,
+  B ~ s(time_index, k = 6),
+  logE ~ 1,
+  D ~ s(time_index, k = 6),
+  seas ~ s(month, bs = "cc", k = 6),  # cyclic: Jan joins Dec smoothly
+  nl = TRUE
+)
+
+priors_m3 <- c(
+  prior(normal(-0.5, 0.5), nlpar = "logA"),
+  prior(normal( 0.0, 0.5), nlpar = "B",    ub = 1),
+  prior(normal(-1.5, 0.5), nlpar = "logE"),
+  prior(normal( 1.5, 0.3), nlpar = "D",    lb = 1),
+  prior(normal( 0.0, 0.3), nlpar = "seas"),  # seasonal centred at 0
+  prior(normal(0, 0.5), nlpar = "B",    class = "sds", lb = 0),
+  prior(normal(0, 0.5), nlpar = "D",    class = "sds", lb = 0),
+  prior(normal(0, 0.5), nlpar = "seas", class = "sds", lb = 0),
+  prior(gamma(2, 0.1), class = "nu")
+)
+
+init_m3 <- replicate(4,
+  list(logA = -0.5, B = 0.0, logE = -1.5, D = 1.5, seas = 0.0, nu = 5),
+  simplify = FALSE)
+```
+
+## Helper: Fit One Model for One Site
+
+```{r fit-helper}
+# Helper function
+# fitting model use brms with given information (in argument)
+fit_lam <- function(formula, prior, init, data, site, model_label,
+                    adapt_delta = 0.999, treedepth = 15,
+                    iter = 10000, warmup = 4000) {
+  
+  brm(
+    formula = formula,
+    data    = data,
+    family  = student(),
+    prior   = prior,
+    chains  = 4,
+    iter    = iter,
+    warmup  = warmup,
+    thin    = 2,
+    cores   = 4,
+    seed    = 42,        
+    init    = init,
+    control = list(adapt_delta   = adapt_delta,
+                   max_treedepth = treedepth),
+    file    = paste0("vers16_lam_", tolower(site), "_", model_label)
+  )
+}
+```
+
+------------------------------------------------------------------------
+
+# Fit All Models
+
+fit all models with helper function
+
+```{r fit-models, results='hide'}
+sites <- c("Thames", "Trent", "Severn")
+
+# Split data by site 
+site_data <- split(df_used, df_used$site_short)
+
+# bseline static model
+fits_m1 <- vector("list", 3L); names(fits_m1) <- sites
+for (s in sites) {
+  fits_m1[[s]] <- fit_lam(formula_m1, priors_m1, init_m1,
+                           data = site_data[[s]], site = s, model_label = "m1",
+                           adapt_delta = 0.99, treedepth = 12,
+                           iter = 8000, warmup = 2000)
+}
+
+# time-varying parameter
+fits_m2 <- vector("list", 3L); names(fits_m2) <- sites
+for (s in sites) {
+  fits_m2[[s]] <- fit_lam(formula_m2, priors_m2, init_m2,
+                           data = site_data[[s]], site = s, model_label = "m2")
+}
+
+# seasonal + time-varying
+fits_m3 <- vector("list", 3L); names(fits_m3) <- sites
+for (s in sites) {
+  fits_m3[[s]] <- fit_lam(formula_m3, priors_m3, init_m3,
+                           data = site_data[[s]], site = s, model_label = "m3")
+}
+```
+
+------------------------------------------------------------------------
+
+# Model Comparison
+
+## LOO-CV
+
+Rule: \|elpd_diff / se_diff\| \> 4 means meaningful improvement.
+
+```{r loo}
+for (s in sites) {
+  fits_m1[[s]] <- add_criterion(fits_m1[[s]], "loo")
+  fits_m2[[s]] <- add_criterion(fits_m2[[s]], "loo")
+  fits_m3[[s]] <- add_criterion(fits_m3[[s]], "loo")
+}
+
+loo_results <- bind_rows(lapply(sites, function(s) {
+  get_loo <- function(fit, label) {
+    l <- fit$criteria$loo
+    tibble(model  = label,
+           elpd_loo = l$estimates["elpd_loo", "Estimate"],
+           p_loo  = l$estimates["p_loo", "Estimate"],
+           se_loo  = l$estimates["elpd_loo", "SE"])
+  }
+  bind_rows(
+    get_loo(fits_m1[[s]],"M1: Basic"),
+    get_loo(fits_m2[[s]],"M2: Time-varying"),
+    get_loo(fits_m3[[s]],"M3: Seasonal+Time")
+  ) %>% mutate(site = s, delta_elpd = elpd_loo - max(elpd_loo)) %>%
+    arrange(desc(elpd_loo))
+}))
+
+print(loo_results)
+
+# Significance ratios
+cat("\n|elpd_diff / se_diff| per site (> 4 = meaningful):\n")
+for (s in sites) {
+  cmp    <- loo_compare(fits_m1[[s]], fits_m2[[s]], fits_m3[[s]], criterion = "loo")
+  ratios <- abs(cmp[, "elpd_diff"] / cmp[, "se_diff"])
+  cat(sprintf("  %s: M3 vs M2 = %.2f | M3 vs M1 = %.2f\n",
+              s, ratios[2], ratios[3]))
+}
+```
+
+------------------------------------------------------------------------
+
+# Checking the Model
+
+## Trace Plots for Convergence
+
+```{r trace-plots, fig.height=8}
+for (s in sites) {
+  pars_key <- intersect(
+    c("b_logA_Intercept", "b_B_Intercept",
+      "b_logE_Intercept", "b_D_Intercept", "nu"),
+    variables(fits_m3[[s]])
+  )
+  p <- mcmc_trace(
+    as_draws_array(fits_m3[[s]]),
+    pars = pars_key,
+    facet_args = list(ncol = 1, strip.position = "left")
+  ) +
+    labs(title = sprintf("Trace plot — %s | Final Model", s)) +
+    theme_bw(base_size = 9)
+  
+  ggsave(
+    filename = sprintf("trace_%s.png", s), plot = p, width = 8,
+    height = 10,dpi = 300
+  )
+}
+```
+
+------------------------------------------------------------------------
+
+## Posterior Predictive Check
+
+We draw 200 replicated datasets from M3 and compare their density to the observed log₁₀(ortho-P). Coverage at 50% and 95% confirms model calibration.
+
+```{r ppc, fig.height=5, fig.width=18}
+ppc_plots <- list()
+
+for (s in sites) {
+  y <- fits_m3[[s]]$data$log10_conc
+  yrep <- posterior_predict(fits_m3[[s]], ndraws = 200, seed = 42)
+  
+  ppc_plots[[s]] <- ppc_dens_overlay(y, yrep[1:50, ]) +
+    labs(title = s) +
+    theme_bw()
+  
+  cov50 <- mean(y >= apply(yrep, 2, quantile, 0.25) &
+                y <= apply(yrep, 2, quantile, 0.75))
+  cov95 <- mean(y >= apply(yrep, 2, quantile, 0.025) &
+                y <= apply(yrep, 2, quantile, 0.975))
+  cat(sprintf("[%s | M3] 50%% coverage: %.1f%% | 95%% coverage: %.1f%%\n",
+              s, 100 * cov50, 100 * cov95))
+}
+
+combined <- wrap_plots(ppc_plots, ncol = 3) +
+  plot_annotation(
+    title = "Posterior Predictive Check — LAM with time-varying parameters and seasonal adjustment"
+  )
+
+print(combined)
+
+ggsave("ppc_m3_combined.png",
+       plot = combined, width = 18, height = 5, dpi = 150)
+```
+
+------------------------------------------------------------------------
+
+## Checking Residuals
+
+```{r}
+# Compute residuals manually for each site 
+qq_plots <- lapply(sites, function(s) {
+  
+  fit <- fits_m3[[s]]
+  data <- site_data[[s]]
+  
+  # posterior median fitted values on log10 scale
+  fitted_vals <- fitted(fit, summary = TRUE)[, "Estimate"]
+  observed <- data$log10_conc
+  cens_flag <- data$cens_flag
+  
+  res <- observed - fitted_vals
+  
+  data.frame(
+    residual  = res,
+    fitted = fitted_vals,
+    observed  = observed,
+    cens_flag = cens_flag,
+    site = s
+  )
+})
+
+qq_all <- do.call(rbind, qq_plots)
+
+# Q-Q plots 
+qq_plot_list <- lapply(sites, function(s) {
+  
+  # detected observations only
+  r <- qq_all[qq_all$site == s & qq_all$cens_flag == "none", "residual"]
+  
+  # standardise
+  r_std <- (r - mean(r)) / sd(r)
+  
+  ggplot(data.frame(r = r_std), aes(sample = r)) +
+    stat_qq(colour = "#2166ac", alpha = 0.6, size = 1.2) +
+    stat_qq_line(colour = "firebrick", linetype = "dashed", linewidth = 0.8) +
+    labs(
+      title = s,
+      x = "Theoretical quantiles",
+      y = "Standardised residuals"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(plot.title = element_text(hjust = 0.5))
+})
+
+combined_qq <- wrap_plots(qq_plot_list, ncol = 3) +
+  plot_annotation(
+    title   = "Q-Q plots of posterior median residuals)"
+  )
+
+print(combined_qq)
+
+ggsave("qq_residuals_m3.png", plot = combined_qq,
+       width = 12, height = 4.5, dpi = 300)
+
+
+```
+
+------------------------------------------------------------------------
+
+# Final Model Summary
+
+```{r}
+fits_m3
+```
+
+------------------------------------------------------------------------
+
+# Daily Predictions from final model
+
+## Daily Prediction for Concentration at Observed Flow value
+
+```{r}
+# Step 1: Get site-specific time_index origin from fitting data
+site_origins <- df_used %>%
+  group_by(site_short) %>%
+  summarise(origin_date = min(date), .groups = "drop")
+
+# Step 2: Build full daily prediction grid from flow_clean 
+# This uses ALL daily flow rows (not just observed concentration days)
+sites_keep <- c("THAMES AT TEDDINGTON WEIR",
+                "TIDAL TRENT - RIVER TRENT AT DUNHAM",
+                "RIVER SEVERN (LOWER) HAW BRIDGE")
+
+df_daily_all <- flow_clean %>%
+  filter(wq_site_name %in% sites_keep, flow > 0, !is.na(flow)) %>%
+  mutate(
+    site_short = case_when(
+      wq_site_name == "THAMES AT TEDDINGTON WEIR"           ~ "Thames",
+      wq_site_name == "TIDAL TRENT - RIVER TRENT AT DUNHAM" ~ "Trent",
+      wq_site_name == "RIVER SEVERN (LOWER) HAW BRIDGE"     ~ "Severn"
+    ),
+    site_short = factor(site_short, levels = c("Thames", "Trent", "Severn")),
+    month = month(date),
+    log10_flow = log10(flow),
+    cens_flag = "none"   
+  ) %>%
+  left_join(site_origins, by = "site_short") %>%
+  mutate(
+    # Same origin as fitting data
+    time_index = as.numeric(date - origin_date) / 365.25
+  ) %>%
+  select(-origin_date)
+
+# Step 3: Split by site 
+flow_daily_list_full <- split(df_daily_all, df_daily_all$site_short)
+
+# Get full posterior draws for all days (not just median_qi summary)
+pred_draws_full <- bind_rows(
+  lapply(sites, function(s) {
+    add_predicted_draws(
+      newdata = flow_daily_list_full[[s]],
+      object = fits_m3[[s]],
+      ndraws = 300,
+      seed = 42
+    ) %>%
+      mutate(
+        pred_mgL = 10^.prediction,
+        site_short = factor(s, levels = c("Thames", "Trent", "Severn"))
+      )
+  })
+)
+
+# Summarise: median and intervals from predicted draws
+pred_summary <- pred_draws_full %>%
+  group_by(site_short, date) %>%
+  median_qi(pred_mgL, .width = c(0.50, 0.95)) %>%
+  ungroup()
+
+# Join observed
+pred_summary <- pred_summary %>%
+  mutate(site_short = as.character(site_short)) %>%
+  left_join(
+    df_used %>%
+      mutate(site_short = as.character(site_short)) %>%
+      select(site_short, date, obs_conc = result, censored),
+    by = c("site_short", "date")
+  )
+
+# Gap-fill for geom_line 
+pred_summary_line <- pred_summary %>%
+  filter(.width == 0.50) %>%
+  group_by(site_short) %>%
+  complete(date = seq(min(date), max(date), by = "day")) %>%
+  ungroup()
+
+# Gap-fill for both line and ribbon
+pred_summary_gapfilled <- pred_summary %>%
+  group_by(site_short, .width) %>%                    
+  complete(date = seq(min(date), max(date), by = "day")) %>%
+  ungroup()
+
+ggplot() +
+  geom_ribbon(
+    data = pred_summary_gapfilled %>% filter(.width == 0.95),
+    aes(x = date, ymin = .lower, ymax = .upper),
+    fill = "#a8c8e8", alpha = 0.4
+  ) +
+  geom_ribbon(
+    data = pred_summary_gapfilled %>% filter(.width == 0.50),
+    aes(x = date, ymin = .lower, ymax = .upper),
+    fill = "#5599cc", alpha = 0.5
+  ) +
+  geom_line(
+    data      = pred_summary_gapfilled %>% filter(.width == 0.50),
+    aes(x = date, y = pred_mgL),
+    colour    = "#2266aa",
+    linewidth = 0.4,
+    na.rm     = FALSE
+  ) +
+  geom_point(
+    data = pred_summary %>% filter(.width == 0.50, !is.na(obs_conc)),
+    aes(x = date, y = obs_conc, colour = censored, shape = censored),
+    size = 1.5, alpha = 0.8
+  ) +
+  scale_colour_manual(
+    values = c("FALSE" = "tomato", "TRUE" = "orange"),
+    labels = c("Detected", "Censored (<LOD)")
+  ) +
+  scale_shape_manual(
+    values = c("FALSE" = 16, "TRUE" = 6),
+    labels = c("Detected", "Censored (<LOD)")
+  ) +
+  facet_wrap(~site_short, ncol = 1, scales = "free_y") +
+  labs(
+    title    = "Daily predicted vs observed orthophosphate — M3",
+    x = NULL, y = "Orthophosphate (mg/L)",
+    colour = NULL, shape = NULL
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom") 
+ggsave("vers15_daily_pred_m3_alldays.png", width = 14, height = 8, dpi = 150)
+```
+
+## Concentration vs Flow (Daily Conc from Fitted Model)
+
+```{r}
+# Save joined data first to avoid repeating the join
+pred_summary_flow <- pred_summary %>%
+  left_join(
+    df_daily_all %>% select(site_short, date, flow, log10_flow),
+    by = c("site_short", "date")
+  )
+
+pred_summary_flow %>%
+  filter(.width == 0.50) %>%
+  ggplot(aes(x = flow, y = pred_mgL)) +
+  # all daily predicted (background)
+  geom_point(
+    alpha = 0.15, size = 0.5, colour = "steelblue"
+  ) +
+  geom_smooth(
+    aes(colour = "Predicted"),
+    method = "loess", se = FALSE, linewidth = 0.8
+  ) +
+  # observed on sampled days (foreground)
+  geom_point(
+    data = pred_summary_flow %>% filter(.width == 0.50, !is.na(obs_conc)),
+    aes(x = flow, y = obs_conc, colour = "Observed"),
+    size = 1.5, alpha = 0.7
+  ) +
+  geom_smooth(
+    data   = pred_summary_flow %>% filter(.width == 0.50, !is.na(obs_conc)),
+    aes(x = flow, y = obs_conc, colour = "Observed"),
+    method = "loess", se = FALSE, linewidth = 0.8
+  ) +
+  scale_colour_manual(
+    values = c("Predicted"="navy", "Observed" = "tomato")
+  ) +
+  facet_wrap(~site_short, scales = "free") +
+  labs(
+    title = "Flow–concentration relationship: predicted vs observed",
+    x = expression(Flow~(m^3~s^{-1})),
+    y = "Orthophosphate (mg/L)",
+    colour = NULL
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave("vers15_lam_eda_scatter_predict.png", width = 10, height = 4, dpi = 150)
+```
+
+## Time-varying Exponents B(t) and D(t)
+
+```{r bdt-plots, fig.height=4}
+B_plots <- lapply(sites, function(s) {
+  plot(conditional_effects(fits_m3[[s]], effects = "time_index",
+                           nlpar = "B", re_formula = NA),
+       plot = FALSE)[[1]] +
+    labs(title = s, x = "Time (years)", y = "B(t)") +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    theme_bw()
+})
+
+D_plots <- lapply(sites, function(s) {
+  plot(conditional_effects(fits_m3[[s]], effects = "time_index",
+                           nlpar = "D", re_formula = NA),
+       plot = FALSE)[[1]] +
+    labs(title = s, x = "Time (years)", y = "D(t)") +
+    geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
+    theme_bw()
+})
+
+wrap_plots(B_plots, ncol = 3) +
+  plot_annotation(title = "Time-varying point-source exponent B(t)",
+                  subtitle = "More negative = stronger dilution")
+ggsave("vers15_b over time.png",
+       width = 13, height = 4, dpi = 150)
+
+wrap_plots(D_plots, ncol = 3) +
+  plot_annotation(title = "Time-varying diffuse-source exponent D(t)",
+                  subtitle = "Higher = stronger runoff signal")
+ggsave("vers15_d over time.png",
+       width = 13, height = 4, dpi = 150)
+```
+
+------------------------------------------------------------------------
+
+# Source Apportionment
+
+## Percentage Contribution by Flow
+
+```{r apportionment-flow, fig.height=5}
+apportionment <- function(fit, newflow, ndraws = 500) {
+  set.seed(42)
+  draws <- as_draws_df(fit) %>% slice_sample(n = ndraws)
+  map_dfr(newflow, function(q) {
+    log10q <- log10(q)
+    pt  <- 10^(draws$b_logA_Intercept + (draws$b_B_Intercept-1) * log10q)
+    dif <- 10^(draws$b_logE_Intercept + (draws$b_D_Intercept-1) * log10q)
+    tibble(flow = q,
+           point_source = pt,
+           diffuse_source = dif,
+           pct_point = 100*pt  / (pt + dif),
+           pct_diffuse= 100*dif / (pt + dif))
+  })
+}
+
+# Global flow range across all sites
+global_flow_min <- min(sapply(sites, function(s) 
+  quantile(site_data[[s]]$flow, 0.05)))
+global_flow_max <- max(sapply(sites, function(s) 
+  quantile(site_data[[s]]$flow, 0.95)))
+
+flow_grid <- 10^seq(log10(global_flow_min),
+                    log10(global_flow_max), 
+                    length.out = 60)
+
+apportion_all <- bind_rows(lapply(sites, function(s) {
+  apportionment(fits_m3[[s]], flow_grid) %>%
+    group_by(flow) %>%
+    summarise(across(c(pct_point, pct_diffuse),
+                     list(median = median, 
+                          lo95 = ~quantile(., 0.025),
+                          hi95 = ~quantile(., 0.975)),
+                     .names = "{.col}_{.fn}"),
+              .groups = "drop") %>%
+    mutate(site = factor(s, levels = c("Thames", "Trent", "Severn")))
+}))
+
+ggplot(apportion_all, aes(x = flow)) +
+  geom_ribbon(aes(ymin = pct_point_lo95,   ymax = pct_point_hi95),
+              fill = "steelblue", alpha = 0.2) +
+  geom_line(aes(y = pct_point_median,   colour = "Point source"),  
+            linewidth = 0.8) +
+  geom_ribbon(aes(ymin = pct_diffuse_lo95, ymax = pct_diffuse_hi95),
+              fill = "forestgreen", alpha = 0.2) +
+  geom_line(aes(y = pct_diffuse_median, colour = "Diffuse source"), 
+            linewidth = 0.8) +
+  geom_hline(yintercept = 50, linetype = "dashed", colour = "grey50") +
+  scale_colour_manual(name   = "Source",
+                      values = c("Point source"   = "steelblue",
+                                 "Diffuse source" = "forestgreen")) +
+  scale_x_log10() +
+  facet_wrap(~site, ncol = 3) +
+  labs(x = expression(Flow~~(m^3~s^{-1})),
+       y = "% contribution") +
+  theme_bw() +
+  theme(legend.position = "bottom")+theme(strip.text = element_text(size = 10))
+
+ggsave("vers15_appor1.png", width = 10, height = 4, dpi = 150)
+```
+
+## Apportionment at Specific Time Points (Final Model)
+
+```{r apportionment-time, fig.height=5}
+# years at which we want to evaluate source apportionment
+years_eval <- c(2000, 2005, 2010, 2015, 2020, 2025)
+# Map season names to their representative month numbers (July= summer, January = winter)
+seasons <- list(summer = 7, winter = 1)  # July = summer, January = winter
+
+
+# Helper function 
+# For a given fitted model (fit) and site, compute the point-source vs.
+# diffuse-source % contributions to orthophosphate at each combination of
+# year and season, evaluated at the median flow for that season/period
+apportion_timepoint_season <- function(fit, site_name, data, daily_data, years, seasons) {
+  min_date <- min(data$date)
+  
+  #iterate over each evaluation year
+  bind_rows(lapply(years, function(yr) {
+    #iterate over each season
+    bind_rows(lapply(names(seasons), function(season_name) {
+      month_val <- seasons[[season_name]]
+      
+      # Compute median flow for each season
+      # Use ±2-year window around the focal year so the flow value is
+      # representative of conditions at that point in time, not the full record
+      med_flow <- daily_data %>%
+        filter(
+          month(date) == month_val,
+          year(date) >= yr-2,
+          year(date) <= yr+2
+        ) %>%
+        pull(flow) %>%
+        median(na.rm = TRUE)
+      
+      # if the ±2-year window contains no data (for example, evaluation
+      # year is outside the observed record), use the overall seasonal median
+      if (is.na(med_flow) | length(med_flow) == 0) {
+        med_flow <- daily_data %>%
+          filter(month(date) == month_val) %>%
+          pull(flow) %>%
+          median(na.rm = TRUE)}
+      
+      
+      # if there is no data for this month at all, use the
+      # grand median across all months and days
+      if (is.na(med_flow)) med_flow <- median(daily_data$flow, na.rm = TRUE)
+      
+      # generate var
+      log10q <- log10(med_flow)
+      
+      # Compute the numeric time index 
+      # Use the 15th of the relevant month as the representative date
+      t_id <- as.numeric(
+        as.Date(paste0(yr, "-", sprintf("%02d", month_val), "-15")) - min_date
+      ) / 365.25
+      
+      # Skip this year/season combination if it falls outside the model's
+      # training time range (can't sensibly extrapolate)
+      if (t_id < 0 | t_id > max(data$time_index)) return(NULL)
+      
+      # Step 3: Build the prediction row 
+      # Take the first row of the site data as a template, then overwrite
+      # the covariates we care about; all other columns are structural
+      # placeholders that the model formula requires
+      newdata <- data %>%
+        slice(1) %>%
+        mutate(time_index = t_id, 
+               log10_flow = log10q,
+               month = month_val, 
+               cens_flag= "none")
+      
+      # Step 4: Draw posterior samples for the non-linear parameters 
+      # B controls the flow-scaling exponent for the point-source component
+      # (linpred_draws extracts the linear predictor on the log scale)
+      set.seed(42)
+      B_draws <- linpred_draws(fit, newdata = newdata,
+                               nlpar= "B", 
+                               ndraws = 500, 
+                               seed = 42)$.linpred
+      
+      set.seed(42)
+      D_draws <- linpred_draws(fit, newdata = newdata,
+                               nlpar= "D", 
+                               ndraws = 500, 
+                               seed  = 42)$.linpred
+      
+      # Also draw 500 samples from the full posterior to get the intercept
+      # parameters (log-scale intercepts for point and diffuse components)
+      set.seed(42)
+      draws <- as_draws_df(fit) %>% slice_sample(n = 500)
+      
+      pt_draws <- 10^(draws$b_logA_Intercept + (B_draws-1) * log10q)
+      dif_draws <- 10^(draws$b_logE_Intercept + (D_draws-1) * log10q)
+      # Total predicted concentration = point+diffuse
+      total <- pt_draws + dif_draws
+      
+      tibble(
+        year = yr,
+        site = site_name,
+        season  = season_name,
+        flow = round(med_flow, 2),
+        conc_median = round(median(total), 3),
+        conc_lo = round(quantile(total, 0.025),3),
+        conc_hi = round(quantile(total, 0.975),3),
+        pct_point = round(100*median(pt_draws/total), 1),
+        pct_diffuse = round(100*median(dif_draws/total), 1),
+        pt_lo = round(quantile(100*pt_draws/total, 0.025), 1),
+        pt_hi = round(quantile(100*pt_draws/total, 0.975), 1),
+        dif_lo = round(quantile(100*dif_draws/total, 0.025), 1),
+        dif_hi = round(quantile(100*dif_draws/total, 0.975), 1)
+      )
+    }))
+  }))
+}
+
+# Run function to every site and store the results into one data frame
+apportion_season <- bind_rows(lapply(sites, function(s) {
+  apportion_timepoint_season(fits_m3[[s]], s, site_data[[s]],
+                             flow_daily_list_full[[s]], 
+                             years_eval, seasons)
+}))
+
+
+# Summary table with flow and concentration, by season and catchment
+apportion_season %>%
+  select(site, year, season, flow, conc_median, conc_lo, conc_hi,
+         pct_point, pct_diffuse) %>%
+  arrange(site, year, season) %>%
+  knitr::kable(
+  col.names = c("Site", "Year", "Season", 
+                "Flow (m$^3$/s)",       # LaTeX superscript
+                "Conc. median", "l-95% CI", "u-95% CI",
+                "% Point", "% Diffuse"),
+  caption = "...",
+  escape = FALSE
+)
+
+
+# apportion by sites
+apportion_season %>%
+  group_by(site, year) %>%
+  summarise(
+    pct_point   = mean(pct_point,   na.rm = TRUE),
+    pct_diffuse = mean(pct_diffuse, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    site = factor(site, levels = c("Thames", "Trent", "Severn")),
+    year = factor(year)
+  ) %>%
+  pivot_longer(cols      = c(pct_point, pct_diffuse),
+               names_to  = "source",
+               values_to = "pct") %>%
+  mutate(source = if_else(source == "pct_point",
+                          "Point source", "Diffuse source"),
+         source = factor(source,
+                         levels = c("Point source", "Diffuse source"))) %>%
+  ggplot(aes(x = year, y = pct, fill = source)) +
+  geom_col(position = "stack", colour = "white", linewidth = 0.3) +
+  geom_hline(yintercept = 50, linetype = "dashed",
+             colour = "red", linewidth = 0.4) +
+  scale_fill_manual(
+    values = c("Point source"   = "grey20",
+               "Diffuse source" = "grey75"),
+    breaks = c("Diffuse source", "Point source")
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1),
+                     limits = c(0, 101),
+                     breaks = c(0, 25, 50, 75, 100)) +
+  facet_wrap(~ site, nrow = 1) +
+  labs(x    = "Year",
+       y    = "% contribution to orthophosphate",
+       fill = NULL) +
+  theme_bw() +
+  theme(legend.position  = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(size = 10))
+
+
+ggsave("apportion_pct.png", width = 10, height = 4, dpi = 150)
+```
+
+------------------------------------------------------------------------
+
+## Parameter Table (Using Model 3)
+
+```{r}
+# years at which we want to evaluate source apportionment
+years_show <- c(2000, 2005, 2010, 2015, 2020, 2025)
+
+# Helper function
+# everything we want to extract a vector of posterior draws
+summarise_param <- function(x) {
+  c(
+    median = round(median(x),3),
+    se= round(sd(x),3),
+    lo95 = round(unname(quantile(x,0.025)),3),
+    hi95 = round(unname(quantile(x,0.975)),3)
+  )
+}
+
+m3_timepoints <- bind_rows(lapply(sites, function(s) {
+  
+  fit <- fits_m3[[s]]
+  min_date <- min(site_data[[s]]$date) #fractional years from first observation
+  
+  map_dfr(years_show, function(yr) {
+    
+    # pin the evaluation to 1 July, as it's neutral mid-year point that
+    # avoids seasonal extremes in either direction
+    t_id <- as.numeric(as.Date(paste0(yr, "-07-01")) - min_date) / 365.25
+    
+    # hold flow at its median so any change across years reflects the
+    # spline trend in B(t)/D(t) rather than a flow effect
+    newdata <- data.frame(
+      log10_flow= median(fit$data$log10_flow),
+      time_index= t_id,
+      month = 7,
+      cens_flag = "none",
+      log10_conc= median(fit$data$log10_conc)
+    )
+    
+    # A and E are time-invariant intercepts, so just pull them straight
+    # from the posterior draws
+    set.seed(42)
+    draws <- as_draws_df(fit) %>% slice_sample(n=500)
+    A_draws  <- 10^draws$b_logA_Intercept
+    Cp_draws <- 10^draws$b_logE_Intercept
+    
+    # B(t) and D(t) are splines, so we must evaluate them at t_id
+    # posterior_epred handles the spline basis internally
+    set.seed(42)
+    B_draws <- posterior_epred(
+      fit,
+      newdata = newdata,
+      nlpar = "B",
+      ndraws= 500
+    ) %>% as.vector()
+    
+    set.seed(42)
+    D_draws <- posterior_epred(
+      fit,
+      newdata = newdata,
+      nlpar = "D",
+      ndraws= 500
+    ) %>% as.vector()
+    
+    # Summarise each parameter
+    A_s <- summarise_param(A_draws)
+    B_s <- summarise_param(B_draws)
+    Cp_s <- summarise_param(Cp_draws)
+    D_s <- summarise_param(D_draws)
+    
+    tibble(
+      Site= s,
+      Year = yr,
+      A_fmt = sprintf("%.3f (%.3f, %.3f)", A_s[1],A_s[3],A_s[4]),
+      B_fmt = sprintf("%.3f (%.3f, %.3f)",B_s[1],B_s[3],B_s[4]),
+      Cp_fmt= sprintf("%.3f (%.3f, %.3f)", Cp_s[1],Cp_s[3],Cp_s[4]),
+      D_fmt= sprintf("%.3f (%.3f, %.3f)",D_s[1],D_s[3],D_s[4])
+    )
+  })
+}))
+
+# produce tidier table with knitr
+m3_timepoints %>%
+  knitr::kable(
+    caption = "M3 posterior median (95\\% credible interval) at selected 
+               time points (evaluated at mid-year, July). $A$ and $C'$ in 
+               mg/L (back-transformed). $B(t)$ and $D(t)$ vary over time 
+               via penalised regression splines",
+    col.names = c("Site","Year",
+                  "A (mg/L)", "B(t)", "C' (mg/L)", "D(t)")
+  )
+```
+
+------------------------------------------------------------------------
+
+*End of analysis. All random operations use `seed = 42` for reproducibility.*
