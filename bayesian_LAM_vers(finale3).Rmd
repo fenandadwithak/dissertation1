@@ -431,7 +431,7 @@ init_m1 <- replicate(4,
 
 ## M2, Time-varying LAM
 
-B(t) and D(t) drift smoothly via thin-plate splines with k=6 basis functions.
+B(t) and D(t) drift smoothly via thin-plate splines with k=6 basis functions
 
 ```{r formula-m2}
 formula_m2 <- bf(
@@ -459,7 +459,7 @@ init_m2 <- replicate(4,
   simplify = FALSE)
 ```
 
-## M3, Seasonal + Time-varying LAM
+## M3, Seasonal adjustment + Time-varying LAM
 
 Extends M2 by adding a cyclic cubic spline for calendar month.
 
@@ -515,7 +515,7 @@ fit_lam <- function(formula, prior, init, data, site, model_label,
     init    = init,
     control = list(adapt_delta   = adapt_delta,
                    max_treedepth = treedepth),
-    file    = paste0("vers16_lam_", tolower(site), "_", model_label)
+    file    = paste0("rds_file/vers16_lam_", tolower(site), "_", model_label)
   )
 }
 ```
